@@ -1,0 +1,20 @@
+# OAuth tokens and secrets
+token.json
+client_secret.json
+
+# OpenCode session data (full transcripts with credentials)
+.omo/
+
+# IDE/agent configs (local machine only)
+.windsurf/
+.devin/
+
+# Unrelated workspace files
+hummingbird-integration-memo.md
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Agent runtime state
+*.state.json
