@@ -10,12 +10,23 @@
 
 set -euo pipefail
 
-# ---- Configuration (set via environment variables) ----
+# ---- Load config file (for cron — env vars take priority if already set) ----
+CONFIG_FILE="$HOME/.birthday-agent/config.sh"
+if [[ -f "$CONFIG_FILE" ]]; then
+    # shellcheck source=/dev/null
+    source "$CONFIG_FILE"
+fi
+
+# ---- PATH (cron has a minimal PATH, ensure tools are findable) ----
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+# ---- Configuration (set via environment variables or config.sh) ----
 SENDER="${SENDER_EMAIL:?Error: SENDER_EMAIL env var not set}"
 RECIPIENTS="${FAMILY_EMAILS:?Error: FAMILY_EMAILS env var not set}"
 CALENDAR_ID="${FAMILY_CALENDAR_ID:?Error: FAMILY_CALENDAR_ID env var not set}"
 TOKEN_DIR="${TOKEN_DIR:-$HOME/.birthday-agent}"
 STATE_FILE="$HOME/.birthday_agent_state.json"
+LOG_FILE="${LOG_FILE:-$HOME/.birthday_agent.log}"
 
 # ---- Dependency check ----
 for cmd in jq perl curl; do
@@ -1476,8 +1487,11 @@ get_unused_indices() {
 extract_name() {
     local summary="$1"
     local clean="$summary"
+    # Strip emoji characters (🎂 💍 and any other Unicode emoji)
+    clean=$(echo "$clean" | sed -E 's/[🕯️🎂💍🎉🎊🧩📜💞🥂🎁⏰]/ /g')
     clean=$(echo "$clean" | sed -E 's/\([^)]*\)//g')
     clean=$(echo "$clean" | sed -E 's/[0-9]+(st|nd|rd|th)//g')
+    clean=$(echo "$clean" | sed -E 's/[0-9]{4}//g')
     clean=$(echo "$clean" | sed -E 's/[Bb][Ii][Rr][Tt][Hh][Dd][Aa][Yy]//g')
     clean=$(echo "$clean" | sed -E 's/[Aa][Nn][Nn][Ii][Vv][Ee][Rr][Ss][Aa][Rr][Yy]//g')
     clean=$(echo "$clean" | sed -E 's/[Pp][Aa][Rr][Tt][Yy]//g')
@@ -1576,18 +1590,32 @@ select_anniv_day_message() {
 send_reminder_email() {
     local subject="$1"
     local body="$2"
+    local access_token="$3"
 
-    RAW_EMAIL=$(printf "Content-Type: text/plain; charset=\"UTF-8\"\nFrom: %s\nTo: %s\nSubject: %s\n\n%s" \
-        "$SENDER" "$RECIPIENTS" "$subject" "$body")
+    local to_header
+    to_header=$(echo "$RECIPIENTS" | sed 's/ /, /g')
+
+    local raw_email
+    raw_email=$(printf "Content-Type: text/plain; charset=\"UTF-8\"\nFrom: %s\nTo: %s\nSubject: %s\n\n%s" \
+        "$SENDER" "$to_header" "$subject" "$body")
 
     local encoded
-    encoded=$(echo -n "$RAW_EMAIL" | base64 -w0 | tr '+/' '-_' | tr -d '=\n')
+    encoded=$(echo -n "$raw_email" | base64 -w0 | tr '+/' '-_' | tr -d '=')
 
-    curl -s -X POST \
+    local resp
+    resp=$(curl -s -X POST \
         "https://gmail.googleapis.com/gmail/v1/users/me/messages/send" \
-        -H "Authorization: Bearer $(cat "$TOKEN_DIR/token.json" | jq -r '.access_token')" \
+        -H "Authorization: Bearer $access_token" \
         -H "Content-Type: application/json" \
-        -d "{\"raw\": \"$encoded\"}"
+        -d "{\"raw\": \"$encoded\"}")
+
+    if ! printf '%s\n' "$resp" | jq -e '.id' >/dev/null 2>&1; then
+        local err_msg
+        err_msg=$(printf '%s\n' "$resp" | jq -r '.error.message // "unknown error"')
+        echo "send_reminder_email: Gmail API error for \"$subject\": $err_msg" >&2
+        return 1
+    fi
+    echo "send_reminder_email: sent \"$subject\""
 }
 
 # ---- Main ----
@@ -1600,10 +1628,22 @@ main() {
     local access_token
     access_token=$(jq -r '.access_token' "$TOKEN_DIR/token.json")
 
-    local expiry
-    expiry=$(jq -r '.expiry // 0' "$TOKEN_DIR/token.json" 2>/dev/null)
     local now
     now=$(date +%s)
+
+    # Compute expiry if missing on first-run token.json (which has 'expires_in' but not 'expiry')
+    local expiry
+    expiry=$(jq -r '.expiry // 0' "$TOKEN_DIR/token.json" 2>/dev/null)
+    if [[ "$expiry" -eq 0 ]]; then
+        local expires_in
+        expires_in=$(jq -r '.expires_in // 0' "$TOKEN_DIR/token.json" 2>/dev/null)
+        if [[ "$expires_in" -gt 0 ]]; then
+            expiry=$(( now + expires_in ))
+        else
+            expiry=$(( now + 3500 ))
+        fi
+    fi
+
     if [[ "$expiry" -lt "$now" ]]; then
         echo "Token expired. Refreshing..."
         local refresh_token
@@ -1615,46 +1655,62 @@ main() {
             -d "refresh_token=$refresh_token" \
             -d "grant_type=refresh_token")
         local new_access
-        new_access=$(echo "$new_token" | jq -r '.access_token')
+        new_access=$(printf '%s\n' "$new_token" | jq -r '.access_token')
         local new_expiry
-        new_expiry=$(( now + $(echo "$new_token" | jq -r '.expires_in // 3600') ))
+        new_expiry=$(( now + $(printf '%s\n' "$new_token" | jq -r '.expires_in // 3600') ))
 
-        jq --arg at "$new_access" --argjson exp "$new_expiry" '.access_token = $at | .expiry = $exp' "$TOKEN_DIR/token.json" > "${TOKEN_DIR}/token_new.json" && mv "${TOKEN_DIR}/token_new.json" "$TOKEN_DIR/token.json"
+        jq --arg at "$new_access" --argjson exp "$new_expiry" \
+            '.access_token = $at | .expiry = $exp' \
+            "$TOKEN_DIR/token.json" > "${TOKEN_DIR}/token_new.json" && \
+            mv "${TOKEN_DIR}/token_new.json" "$TOKEN_DIR/token.json"
         access_token="$new_access"
     fi
 
     local today
-    today=$(date +%Y-%m-%d)
+    today="${BIRTHDAY_AGENT_TODAY:-$(date +%Y-%m-%d)}"
     local current_year
     current_year=$(date +%Y)
 
-    local events
-    events=$(curl -s \
+    local matched_events
+    local api_resp
+    api_resp=$(curl -s \
         "https://www.googleapis.com/calendar/v3/calendars/${CALENDAR_ID}/events?timeMin=${today}T00:00:00Z&timeMax=${today}T23:59:59Z&singleEvents=true&orderBy=startTime" \
         -H "Authorization: Bearer $access_token")
-
-    local matched_events
-    matched_events=$(echo "$events" | jq -c '.items[] | select(.summary | test("[Bb][Ii][Rr][Tt][Hh][Dd][Aa][Yy]") or test("[Aa][Nn][Nn][Ii][Vv][Ee][Rr][Ss][Aa][Rr][Yy]"))' 2>/dev/null || true)
+    if printf '%s\n' "$api_resp" | jq -e '.error' >/dev/null 2>&1; then
+        local api_err
+        api_err=$(printf '%s\n' "$api_resp" | jq -r '.error.message')
+        echo "Calendar API error (today query): $api_err" >&2
+        matched_events=""
+    else
+        matched_events=$(printf '%s\n' "$api_resp" | \
+            jq -c '.items[] | select(.summary | test("[Bb][Ii][Rr][Tt][Hh][Dd][Aa][Yy]") or test("[Aa][Nn][Nn][Ii][Vv][Ee][Rr][Ss][Aa][Rr][Yy]"))' 2>/dev/null || true)
+    fi
 
     if [[ -z "$matched_events" ]]; then
-        local future_events
-        future_events=$(curl -s \
+        local future_matched
+        api_resp=$(curl -s \
             "https://www.googleapis.com/calendar/v3/calendars/${CALENDAR_ID}/events?timeMin=${today}T00:00:00Z&timeMax=$(date -j -v+60d +%Y-%m-%d)T23:59:59Z&singleEvents=true&orderBy=startTime" \
             -H "Authorization: Bearer $access_token")
-
-        local future_matched
-        future_matched=$(echo "$future_events" | jq -c '.items[] | select(.summary | test("[Bb][Ii][Rr][Tt][Hh][Dd][Aa][Yy]") or test("[Aa][Nn][Nn][Ii][Vv][Ee][Rr][Ss][Aa][Rr][Yy]"))' 2>/dev/null || true)
+        if printf '%s\n' "$api_resp" | jq -e '.error' >/dev/null 2>&1; then
+            local api_err2
+            api_err2=$(printf '%s\n' "$api_resp" | jq -r '.error.message')
+            echo "Calendar API error (60-day query): $api_err2" >&2
+            future_matched=""
+        else
+            future_matched=$(printf '%s\n' "$api_resp" | \
+                jq -c '.items[] | select(.summary | test("[Bb][Ii][Rr][Tt][Hh][Dd][Aa][Yy]") or test("[Aa][Nn][Nn][Ii][Vv][Ee][Rr][Ss][Aa][Rr][Yy]"))' 2>/dev/null || true)
+        fi
 
         if [[ -z "$future_matched" ]]; then
             echo "No birthdays or anniversaries in the next 60 days."
             exit 0
         fi
 
-        echo "$future_matched" | while IFS= read -r item; do
+        printf '%s\n' "$future_matched" | while IFS= read -r item; do
             local summary
-            summary=$(echo "$item" | jq -r '.summary // "Unknown"')
+            summary=$(printf '%s\n' "$item" | jq -r '.summary // "Unknown"')
             local event_date
-            event_date=$(echo "$item" | jq -r '.start.date // .start.dateTime // ""' | cut -d'T' -f1)
+            event_date=$(printf '%s\n' "$item" | jq -r '.start.date // .start.dateTime // ""' | cut -d'T' -f1)
             if [[ -z "$event_date" ]]; then continue; fi
 
             local person_name
@@ -1669,7 +1725,11 @@ main() {
                 event_epoch=$(date -d "$event_date" "+%s" 2>/dev/null || echo 0)
             fi
             local today_epoch
-            today_epoch=$(date +%s)
+            if [[ "$(uname)" == "Darwin" ]]; then
+                today_epoch=$(date -jf "%Y-%m-%d" "$today" "+%s" 2>/dev/null || date +%s)
+            else
+                today_epoch=$(date -d "$today" "+%s" 2>/dev/null || date +%s)
+            fi
             local days_until
             days_until=$(( (event_epoch - today_epoch) / 86400 ))
 
@@ -1687,7 +1747,7 @@ ${poem}
 🎂 Birthdays are nature's way of telling us to eat more cake!
 📅 The Family Timekeeper"
 
-                    send_reminder_email "Mark Your Calendar: Only 30 Days Until ${person_name}'s Birthday!" "$body"
+                    send_reminder_email "Mark Your Calendar: Only 30 Days Until ${person_name}'s Birthday!" "$body" "$access_token"
                     echo "Sent 30-day poem for $person_name."
 
                 elif [[ "$days_until" -eq 7 ]]; then
@@ -1703,7 +1763,7 @@ ${riddle}
 ⏰ Time's ticking! One week to go — don't be late to the party!
 🎁 The Family Timekeeper"
 
-                    send_reminder_email "Just One Week to Go: ${person_name}'s Birthday Is Almost Here!" "$body"
+                    send_reminder_email "Just One Week to Go: ${person_name}'s Birthday Is Almost Here!" "$body" "$access_token"
                     echo "Sent 7-day riddle for $person_name."
 
                 elif [[ "$days_until" -eq 0 ]]; then
@@ -1721,7 +1781,7 @@ Happy birthday, ${person_name}! Hope today is filled with love, laughter, and at
 🎉 Don't count the candles — enjoy the glow!
 🕯️ The Family Timekeeper"
 
-                    send_reminder_email "It's Today! Happy Birthday to ${person_name}!" "$body"
+                    send_reminder_email "It's Today! Happy Birthday to ${person_name}!" "$body" "$access_token"
                     echo "Sent day-of haiku for $person_name."
                 fi
 
@@ -1739,7 +1799,7 @@ ${anniv_msg}
 💍 Love is sharing your last slice of pizza. Happy anniversary to ${person_name}!
 🗓️ The Family Timekeeper"
 
-                    send_reminder_email "One Week to Go: ${person_name}'s Anniversary Is Almost Here!" "$body"
+                    send_reminder_email "One Week to Go: ${person_name}'s Anniversary Is Almost Here!" "$body" "$access_token"
                     echo "Sent 7-day anniversary reminder for $person_name."
 
                 elif [[ "$days_until" -eq 0 ]]; then
@@ -1755,7 +1815,7 @@ ${anniv_day_msg}
 🥂 Here's to love, laughter, and happily ever after!
 💞 Cheers to ${person_name} from The Family Timekeeper"
 
-                    send_reminder_email "It's Today! Happy Anniversary to ${person_name}!" "$body"
+                    send_reminder_email "It's Today! Happy Anniversary to ${person_name}!" "$body" "$access_token"
                     echo "Sent day-of anniversary message for $person_name."
                 fi
             fi
@@ -1763,13 +1823,13 @@ ${anniv_day_msg}
 
     else
         # There is an event today
-        echo "$matched_events" | while IFS= read -r item; do
+        printf '%s\n' "$matched_events" | while IFS= read -r item; do
             local summary
-            summary=$(echo "$item" | jq -r '.summary // "Unknown"')
+            summary=$(printf '%s\n' "$item" | jq -r '.summary // "Unknown"')
             local person_name
             person_name=$(extract_name "$summary")
             local event_date
-            event_date=$(echo "$item" | jq -r '.start.date // .start.dateTime // ""' | cut -d'T' -f1)
+            event_date=$(printf '%s\n' "$item" | jq -r '.start.date // .start.dateTime // ""' | cut -d'T' -f1)
             local full_date
             full_date=$(format_date "$event_date")
 
@@ -1788,17 +1848,16 @@ Happy birthday, ${person_name}! Hope today is filled with love, laughter, and at
 🎉 Don't count the candles — enjoy the glow!
 🕯️ The Family Timekeeper"
 
-                send_reminder_email "It's Today! Happy Birthday to ${person_name}!" "$body"
+                send_reminder_email "It's Today! Happy Birthday to ${person_name}!" "$body" "$access_token"
                 echo "Sent day-of haiku for $person_name."
 
                 # Create yearly recurring event on primary calendar
                 local primary_calendar="primary"
-                local existing
-                existing=$(curl -s \
-                    "https://www.googleapis.com/calendar/v3/calendars/${primary_calendar}/events?q=${person_name}+birthday&timeMin=${current_year}-01-01T00:00:00Z&timeMax=${current_year}-12-31T23:59:59Z" \
-                    -H "Authorization: Bearer $access_token")
 
-                if ! echo "$existing" | jq -e '.items | length > 0' >/dev/null 2>&1; then
+                if ! curl -s \
+                    "https://www.googleapis.com/calendar/v3/calendars/${primary_calendar}/events?q=${person_name}+birthday&timeMin=${current_year}-01-01T00:00:00Z&timeMax=${current_year}-12-31T23:59:59Z" \
+                    -H "Authorization: Bearer $access_token" | \
+                    jq -e '.items | length > 0' >/dev/null 2>&1; then
                     local recurring_event
                     recurring_event=$(jq -n \
                         --arg summary "${person_name}'s Birthday" \
@@ -1831,17 +1890,16 @@ ${anniv_day_msg}
 🥂 Here's to love, laughter, and happily ever after!
 💞 Cheers to ${person_name} from The Family Timekeeper"
 
-                send_reminder_email "It's Today! Happy Anniversary to ${person_name}!" "$body"
+                send_reminder_email "It's Today! Happy Anniversary to ${person_name}!" "$body" "$access_token"
                 echo "Sent day-of anniversary message for $person_name."
 
                 # Create yearly recurring event on primary calendar
                 local primary_calendar="primary"
-                local existing
-                existing=$(curl -s \
-                    "https://www.googleapis.com/calendar/v3/calendars/${primary_calendar}/events?q=${person_name}+anniversary&timeMin=${current_year}-01-01T00:00:00Z&timeMax=${current_year}-12-31T23:59:59Z" \
-                    -H "Authorization: Bearer $access_token")
 
-                if ! echo "$existing" | jq -e '.items | length > 0' >/dev/null 2>&1; then
+                if ! curl -s \
+                    "https://www.googleapis.com/calendar/v3/calendars/${primary_calendar}/events?q=${person_name}+anniversary&timeMin=${current_year}-01-01T00:00:00Z&timeMax=${current_year}-12-31T23:59:59Z" \
+                    -H "Authorization: Bearer $access_token" | \
+                    jq -e '.items | length > 0' >/dev/null 2>&1; then
                     local recurring_event
                     recurring_event=$(jq -n \
                         --arg summary "${person_name}'s Anniversary" \
