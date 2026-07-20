@@ -1744,6 +1744,7 @@ main() {
 
 ${poem}
 
+${person_name}'s birthday is on ${full_date}.
 🎂 Birthdays are nature's way of telling us to eat more cake!
 📅 The Family Timekeeper"
 
@@ -1760,6 +1761,7 @@ ${poem}
 
 ${riddle}
 
+${person_name}'s birthday is on ${full_date}.
 ⏰ Time's ticking! One week to go — don't be late to the party!
 🎁 The Family Timekeeper"
 
@@ -1796,6 +1798,7 @@ Happy birthday, ${person_name}! Hope today is filled with love, laughter, and at
 
 ${anniv_msg}
 
+${person_name}'s anniversary is on ${full_date}.
 💍 Love is sharing your last slice of pizza. Happy anniversary to ${person_name}!
 🗓️ The Family Timekeeper"
 
