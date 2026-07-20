@@ -20,8 +20,8 @@ jobs:
       - name: Setup OAuth tokens
         run: |
           mkdir -p "$HOME/.birthday-agent"
-          echo '${{ secrets.CLIENT_SECRET_JSON }}' > "$HOME/.birthday-agent/client_secret.json"
-          echo '${{ secrets.TOKEN_JSON }}' > "$HOME/.birthday-agent/token.json"
+          echo "${{ secrets.TOKEN_JSON }}" | base64 -d > "$HOME/.birthday-agent/token.json"
+          echo "${{ secrets.CLIENT_SECRET_JSON }}" | base64 -d > "$HOME/.birthday-agent/client_secret.json"
 
       - name: Run birthday agent
         env:
