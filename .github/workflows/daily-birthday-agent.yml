@@ -18,15 +18,13 @@ jobs:
           sudo apt-get install -y jq zsh
 
       - name: Setup OAuth tokens
-        shell: bash
+        env:
+          TOKEN_JSON: ${{ secrets.TOKEN_JSON }}
+          CLIENT_SECRET_JSON: ${{ secrets.CLIENT_SECRET_JSON }}
         run: |
           mkdir -p "$HOME/.birthday-agent"
-          cat > "$HOME/.birthday-agent/token.json" << 'TOKENEOF'
-${{ secrets.TOKEN_JSON }}
-TOKENEOF
-          cat > "$HOME/.birthday-agent/client_secret.json" << 'SECRETEOF'
-${{ secrets.CLIENT_SECRET_JSON }}
-SECRETEOF
+          printf '%s' "$TOKEN_JSON" > "$HOME/.birthday-agent/token.json"
+          printf '%s' "$CLIENT_SECRET_JSON" > "$HOME/.birthday-agent/client_secret.json"
 
       - name: Run birthday agent
         env:
