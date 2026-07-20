@@ -1,0 +1,33 @@
+name: Daily Birthday Agent
+
+on:
+  schedule:
+    # 7 AM EST = 12 PM UTC (GitHub Actions runs in UTC)
+    - cron: '0 12 * * *'
+  workflow_dispatch:  # allows manual trigger from GitHub UI
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq zsh
+
+      - name: Setup OAuth tokens
+        run: |
+          mkdir -p "$HOME/.birthday-agent"
+          echo '${{ secrets.CLIENT_SECRET_JSON }}' > "$HOME/.birthday-agent/client_secret.json"
+          echo '${{ secrets.TOKEN_JSON }}' > "$HOME/.birthday-agent/token.json"
+
+      - name: Run birthday agent
+        env:
+          SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
+          FAMILY_EMAILS: ${{ secrets.FAMILY_EMAILS }}
+          FAMILY_CALENDAR_ID: ${{ secrets.FAMILY_CALENDAR_ID }}
+          TOKEN_DIR: $HOME/.birthday-agent
+        run: |
+          zsh run_birthday_agent.sh
