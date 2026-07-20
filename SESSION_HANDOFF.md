@@ -63,7 +63,30 @@ PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 - On macOS, cron needs **Full Disk Access** granted to `cron` in System Settings → Privacy → Full Disk Access
 - If cron doesn't run, test manually: run the script directly from terminal
 
+## GitHub Actions Cloud Cron (Jul 19, 2026)
+
+Replaced local cron with GitHub Actions scheduled workflow (runs in cloud, no machine needed):
+
+**Workflow file**: `.github/workflows/daily-birthday-agent.yml`
+
+**Schedule**: `0 12 * * *` UTC = **7 AM EST** daily
+
+**Repository secrets set:**
+| Secret | Status |
+|---|---|
+| `CLIENT_SECRET_JSON` | ✅ Set |
+| `TOKEN_JSON` | ✅ Set |
+| `SENDER_EMAIL` | ✅ Set |
+| `FAMILY_EMAILS` | ✅ Set (josephrguy@gmail.com eugenianerimini@gmail.com) |
+| `FAMILY_CALENDAR_ID` | ✅ Set |
+
+**To test run:** https://github.com/josephRguy/family-birthday-agent/actions → "Run workflow"
+
+**To add recipients:** Edit the `FAMILY_EMAILS` secret at repo Settings → Secrets and variables → Actions
+
+**Note:** GitHub Actions had a service outage during setup (Jul 19, 2026). If the first run fails with "503" or "degraded availability", wait for status.github.com to show green and re-run.
+
 ## Next Steps
 - Verify recurring events populate correctly in 2027 and beyond
-- Consider adding Sentry DSN to env for error tracking
-- Test run: `./run_birthday_agent.sh` from terminal to verify end-to-end before relying on cron
+- Test workflow run once GitHub Actions is healthy
+- Consider adding Sentry DSN to env for error monitoring
