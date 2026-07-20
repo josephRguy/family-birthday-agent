@@ -31,6 +31,5 @@ jobs:
           SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
           FAMILY_EMAILS: ${{ secrets.FAMILY_EMAILS }}
           FAMILY_CALENDAR_ID: ${{ secrets.FAMILY_CALENDAR_ID }}
-          TOKEN_DIR: $HOME/.birthday-agent
         run: |
           zsh run_birthday_agent.sh
