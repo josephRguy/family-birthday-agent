@@ -33,13 +33,37 @@ All standard birthday & anniversary events verified as **yearly recurring**:
 - `send_reminder_email` token passing fix
 - `SETUP_GUIDE.md` written
 
-## Cron Job Considerations
-- OAuth token **expires after 7 days** — must refresh or rotate
-- Script has a `STARTUP_DELAY` to ensure network readiness
-- Add Sentry monitoring + email alerts for failures
-- Test run recommended after any token refresh
+## Daily Cron Setup (Jul 19, 2026)
+
+Installed crontab at 9 AM daily:
+
+```
+SENDER_EMAIL="josephrguy@gmail.com"
+FAMILY_EMAILS="josephrguy@gmail.com eugenianerimini@gmail.com"
+FAMILY_CALENDAR_ID="d4769661892cb18a085ee7a79c9ca73e0557ddef726c693c19492596b532a802@group.calendar.google.com"
+TOKEN_DIR="$HOME/.birthday-agent"
+PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+
+0 9 * * * /Users/josephguy/Documents/New OpenCode Project/run_birthday_agent.sh >> $HOME/.birthday_agent.log 2>&1
+```
+
+**Config:**
+- **Sender**: josephrguy@gmail.com
+- **Recipients**: josephrguy@gmail.com, eugenianerimini@gmail.com
+- **Calendar**: Guy Family Mafia (ID above)
+- **Token**: `~/.birthday-agent/token.json` (has refresh_token — auto-refreshes on expiry)
+- **Logs**: `~/.birthday_agent.log`
+
+**To add more recipients** → edit crontab: `crontab -e`, add emails to `FAMILY_EMAILS`.
+
+## Cron Health Notes
+- OAuth token has a **refresh_token** — script auto-refreshes on expiry
+- Add Sentry DSN to env for error monitoring
+- Check `~/.birthday_agent.log` if runs aren't working
+- On macOS, cron needs **Full Disk Access** granted to `cron` in System Settings → Privacy → Full Disk Access
+- If cron doesn't run, test manually: run the script directly from terminal
 
 ## Next Steps
 - Verify recurring events populate correctly in 2027 and beyond
 - Consider adding Sentry DSN to env for error tracking
-- Add health check / monitoring for the daily cron run
+- Test run: `./run_birthday_agent.sh` from terminal to verify end-to-end before relying on cron
