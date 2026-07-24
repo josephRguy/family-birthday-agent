@@ -1671,76 +1671,61 @@ main() {
     local current_year
     current_year=$(date +%Y)
 
-    local matched_events
+    # Use Perl for portable 60-day max date calculation (works on both macOS and Linux)
+    local max_date
+    max_date=$(perl -e 'use POSIX strftime; print strftime("%Y-%m-%d", localtime(time + 60*86400));')
+
     local api_resp
     api_resp=$(curl -s \
-        "https://www.googleapis.com/calendar/v3/calendars/${CALENDAR_ID}/events?timeMin=${today}T00:00:00Z&timeMax=${today}T23:59:59Z&singleEvents=true&orderBy=startTime" \
+        "https://www.googleapis.com/calendar/v3/calendars/${CALENDAR_ID}/events?timeMin=${today}T00:00:00Z&timeMax=${max_date}T23:59:59Z&singleEvents=true&orderBy=startTime" \
         -H "Authorization: Bearer $access_token")
+
     if printf '%s\n' "$api_resp" | jq -e '.error' >/dev/null 2>&1; then
         local api_err
         api_err=$(printf '%s\n' "$api_resp" | jq -r '.error.message')
-        echo "Calendar API error (today query): $api_err" >&2
-        matched_events=""
-    else
-        matched_events=$(printf '%s\n' "$api_resp" | \
-            jq -c '.items[] | select(.summary | test("[Bb][Ii][Rr][Tt][Hh][Dd][Aa][Yy]") or test("[Aa][Nn][Nn][Ii][Vv][Ee][Rr][Ss][Aa][Rr][Yy]"))' 2>/dev/null || true)
+        echo "Calendar API error: $api_err" >&2
+        exit 1
     fi
 
+    local matched_events
+    matched_events=$(printf '%s\n' "$api_resp" | \
+        jq -c '.items[]? | select(.summary | test("[Bb][Ii][Rr][Tt][Hh][Dd][Aa][Yy]") or test("[Aa][Nn][Nn][Ii][Vv][Ee][Rr][Ss][Aa][Rr][Yy]"))' 2>/dev/null || true)
+
     if [[ -z "$matched_events" ]]; then
-        local future_matched
-        api_resp=$(curl -s \
-            "https://www.googleapis.com/calendar/v3/calendars/${CALENDAR_ID}/events?timeMin=${today}T00:00:00Z&timeMax=$(date -j -v+60d +%Y-%m-%d)T23:59:59Z&singleEvents=true&orderBy=startTime" \
-            -H "Authorization: Bearer $access_token")
-        if printf '%s\n' "$api_resp" | jq -e '.error' >/dev/null 2>&1; then
-            local api_err2
-            api_err2=$(printf '%s\n' "$api_resp" | jq -r '.error.message')
-            echo "Calendar API error (60-day query): $api_err2" >&2
-            future_matched=""
-        else
-            future_matched=$(printf '%s\n' "$api_resp" | \
-                jq -c '.items[] | select(.summary | test("[Bb][Ii][Rr][Tt][Hh][Dd][Aa][Yy]") or test("[Aa][Nn][Nn][Ii][Vv][Ee][Rr][Ss][Aa][Rr][Yy]"))' 2>/dev/null || true)
-        fi
+        echo "No birthdays or anniversaries in the next 60 days."
+        exit 0
+    fi
 
-        if [[ -z "$future_matched" ]]; then
-            echo "No birthdays or anniversaries in the next 60 days."
-            exit 0
-        fi
+    printf '%s\n' "$matched_events" | while IFS= read -r item; do
+        if [[ -z "$item" ]]; then continue; fi
 
-        printf '%s\n' "$future_matched" | while IFS= read -r item; do
-            local summary
-            summary=$(printf '%s\n' "$item" | jq -r '.summary // "Unknown"')
-            local event_date
-            event_date=$(printf '%s\n' "$item" | jq -r '.start.date // .start.dateTime // ""' | cut -d'T' -f1)
-            if [[ -z "$event_date" ]]; then continue; fi
+        local summary=""
+        summary=$(printf '%s\n' "$item" | jq -r '.summary // "Unknown"')
+        local event_date=""
+        event_date=$(printf '%s\n' "$item" | jq -r '.start.date // .start.dateTime // ""' | cut -d'T' -f1)
+        if [[ -z "$event_date" ]]; then continue; fi
 
-            local person_name
-            person_name=$(extract_name "$summary")
-            local full_date
-            full_date=$(format_date "$event_date")
+        local person_name=""
+        person_name=$(extract_name "$summary")
+        local full_date=""
+        full_date=$(format_date "$event_date")
 
-            local event_epoch
-            if [[ "$(uname)" == "Darwin" ]]; then
-                event_epoch=$(date -jf "%Y-%m-%d" "$event_date" "+%s" 2>/dev/null || echo 0)
-            else
-                event_epoch=$(date -d "$event_date" "+%s" 2>/dev/null || echo 0)
-            fi
-            local today_epoch
-            if [[ "$(uname)" == "Darwin" ]]; then
-                today_epoch=$(date -jf "%Y-%m-%d" "$today" "+%s" 2>/dev/null || date +%s)
-            else
-                today_epoch=$(date -d "$today" "+%s" 2>/dev/null || date +%s)
-            fi
-            local days_until
-            days_until=$(( (event_epoch - today_epoch) / 86400 ))
+        # Compute exact difference in days between event_date and today using Perl (portable & robust across OSes/timezones)
+        local days_until=0
+        days_until=$(perl -MTime::Piece -e '
+            my $d1 = Time::Piece->strptime($ARGV[0], "%Y-%m-%d");
+            my $d2 = Time::Piece->strptime($ARGV[1], "%Y-%m-%d");
+            print int(($d1 - $d2) / 86400);
+        ' "$event_date" "$today" 2>/dev/null || echo -999)
 
-            if [[ "$summary" =~ [Bb][Ii][Rr][Tt][Hh][Dd][Aa][Yy] ]]; then
-                if [[ "$days_until" -eq 30 ]]; then
-                    echo "30 days until $person_name birthday. Sending poem reminder..."
+        if [[ "$summary" =~ [Bb][Ii][Rr][Tt][Hh][Dd][Aa][Yy] ]]; then
+            if [[ "$days_until" -eq 30 ]]; then
+                echo "30 days until $person_name birthday. Sending poem reminder..."
 
-                    local poem
-                    poem=$(select_poem "$person_name" "$full_date")
+                local poem
+                poem=$(select_poem "$person_name" "$full_date")
 
-                    body="Hello there,
+                body="Hello there,
 
 ${poem}
 
@@ -1748,16 +1733,16 @@ ${person_name}'s birthday is on ${full_date}.
 🎂 Birthdays are nature's way of telling us to eat more cake!
 📅 The Family Timekeeper"
 
-                    send_reminder_email "Mark Your Calendar: Only 30 Days Until ${person_name}'s Birthday!" "$body" "$access_token"
-                    echo "Sent 30-day poem for $person_name."
+                send_reminder_email "Mark Your Calendar: Only 30 Days Until ${person_name}'s Birthday!" "$body" "$access_token"
+                echo "Sent 30-day poem for $person_name."
 
-                elif [[ "$days_until" -eq 7 ]]; then
-                    echo "7 days until $person_name birthday. Sending riddle reminder..."
+            elif [[ "$days_until" -eq 7 ]]; then
+                echo "7 days until $person_name birthday. Sending riddle reminder..."
 
-                    local riddle
-                    riddle=$(select_riddle "$person_name" "$full_date")
+                local riddle
+                riddle=$(select_riddle "$person_name" "$full_date")
 
-                    body="Hola,
+                body="Hola,
 
 ${riddle}
 
@@ -1765,78 +1750,10 @@ ${person_name}'s birthday is on ${full_date}.
 ⏰ Time's ticking! One week to go — don't be late to the party!
 🎁 The Family Timekeeper"
 
-                    send_reminder_email "Just One Week to Go: ${person_name}'s Birthday Is Almost Here!" "$body" "$access_token"
-                    echo "Sent 7-day riddle for $person_name."
+                send_reminder_email "Just One Week to Go: ${person_name}'s Birthday Is Almost Here!" "$body" "$access_token"
+                echo "Sent 7-day riddle for $person_name."
 
-                elif [[ "$days_until" -eq 0 ]]; then
-                    echo "Today is $person_name birthday! Sending haiku..."
-
-                    local haiku
-                    haiku=$(select_haiku "$person_name" "$full_date")
-
-                    body="Hi everyone,
-
-${haiku}
-
-Happy birthday, ${person_name}! Hope today is filled with love, laughter, and at least one good surprise.
-
-🎉 Don't count the candles — enjoy the glow!
-🕯️ The Family Timekeeper"
-
-                    send_reminder_email "It's Today! Happy Birthday to ${person_name}!" "$body" "$access_token"
-                    echo "Sent day-of haiku for $person_name."
-                fi
-
-            elif [[ "$summary" =~ [Aa][Nn][Nn][Ii][Vv][Ee][Rr][Ss][Aa][Rr][Yy] ]]; then
-                if [[ "$days_until" -eq 7 ]]; then
-                    echo "7 days until $person_name anniversary. Sending reminder..."
-
-                    local anniv_msg
-                    anniv_msg=$(select_anniv_7d_message "$person_name" "$full_date")
-
-                    body="Hello there,
-
-${anniv_msg}
-
-${person_name}'s anniversary is on ${full_date}.
-💍 Love is sharing your last slice of pizza. Happy anniversary to ${person_name}!
-🗓️ The Family Timekeeper"
-
-                    send_reminder_email "One Week to Go: ${person_name}'s Anniversary Is Almost Here!" "$body" "$access_token"
-                    echo "Sent 7-day anniversary reminder for $person_name."
-
-                elif [[ "$days_until" -eq 0 ]]; then
-                    echo "Today is $person_name anniversary! Sending day-of message..."
-
-                    local anniv_day_msg
-                    anniv_day_msg=$(select_anniv_day_message "$person_name" "$full_date")
-
-                    body="Hi everyone,
-
-${anniv_day_msg}
-
-🥂 Here's to love, laughter, and happily ever after!
-💞 Cheers to ${person_name} from The Family Timekeeper"
-
-                    send_reminder_email "It's Today! Happy Anniversary to ${person_name}!" "$body" "$access_token"
-                    echo "Sent day-of anniversary message for $person_name."
-                fi
-            fi
-        done
-
-    else
-        # There is an event today
-        printf '%s\n' "$matched_events" | while IFS= read -r item; do
-            local summary
-            summary=$(printf '%s\n' "$item" | jq -r '.summary // "Unknown"')
-            local person_name
-            person_name=$(extract_name "$summary")
-            local event_date
-            event_date=$(printf '%s\n' "$item" | jq -r '.start.date // .start.dateTime // ""' | cut -d'T' -f1)
-            local full_date
-            full_date=$(format_date "$event_date")
-
-            if [[ "$summary" =~ [Bb][Ii][Rr][Tt][Hh][Dd][Aa][Yy] ]]; then
+            elif [[ "$days_until" -eq 0 ]]; then
                 echo "Today is $person_name birthday! Sending day-of haiku..."
 
                 local haiku
@@ -1879,8 +1796,27 @@ Happy birthday, ${person_name}! Hope today is filled with love, laughter, and at
                         -d "$recurring_event" >/dev/null
                     echo "Created yearly recurring event for $person_name birthday on primary calendar."
                 fi
+            fi
 
-            elif [[ "$summary" =~ [Aa][Nn][Nn][Ii][Vv][Ee][Rr][Ss][Aa][Rr][Yy] ]]; then
+        elif [[ "$summary" =~ [Aa][Nn][Nn][Ii][Vv][Ee][Rr][Ss][Aa][Rr][Yy] ]]; then
+            if [[ "$days_until" -eq 7 ]]; then
+                echo "7 days until $person_name anniversary. Sending reminder..."
+
+                local anniv_msg
+                anniv_msg=$(select_anniv_7d_message "$person_name" "$full_date")
+
+                body="Hello there,
+
+${anniv_msg}
+
+${person_name}'s anniversary is on ${full_date}.
+💍 Love is sharing your last slice of pizza. Happy anniversary to ${person_name}!
+🗓️ The Family Timekeeper"
+
+                send_reminder_email "One Week to Go: ${person_name}'s Anniversary Is Almost Here!" "$body" "$access_token"
+                echo "Sent 7-day anniversary reminder for $person_name."
+
+            elif [[ "$days_until" -eq 0 ]]; then
                 echo "Today is $person_name anniversary! Sending day-of message..."
 
                 local anniv_day_msg
@@ -1922,8 +1858,8 @@ ${anniv_day_msg}
                     echo "Created yearly recurring event for $person_name anniversary on primary calendar."
                 fi
             fi
-        done
-    fi
+        fi
+    done
 
     echo "Birthday agent run complete at $(date)."
 }
